@@ -95,7 +95,7 @@ div.mermaid-popup-button:hover, div.mermaid-popup-button-reading:hover {
     background: rgba(255, 255, 255, 0.9);
 }
 
-.arrow-up, .arrow-down, .arrow-left, .arrow-right, .zoom-in, .zoom-out, .close-popup {
+.arrow-up, .arrow-down, .arrow-left, .arrow-right, .zoom-in, .zoom-out, .close-popup, .download-diagram {
     width: 30px;
     height: 30px;
     display: flex;
@@ -104,8 +104,8 @@ div.mermaid-popup-button:hover, div.mermaid-popup-button-reading:hover {
 }
 
 /* 按钮的 hover 样式 */
-.arrow-up:hover, .arrow-down:hover, .arrow-left:hover, .arrow-right:hover, 
-.zoom-in:hover, .zoom-out:hover, .close-popup:hover {
+.arrow-up:hover, .arrow-down:hover, .arrow-left:hover, .arrow-right:hover,
+.zoom-in:hover, .zoom-out:hover, .close-popup:hover, .download-diagram:hover {
     background-color: var(--button-bg-hover);
     color: var(--button-color-hover);
 }
