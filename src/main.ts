@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, setIcon  } from 'obsidian';
+import { Plugin, MarkdownView, setIcon, Modal, Notice, Setting } from 'obsidian';
 import MermaidPopupSettingTab from './settings';
 
 interface MermaidPopupSetting {
@@ -392,7 +392,7 @@ export default class MermaidPopupPlugin extends Plugin {
             targetContainer.setCssStyles({
                 display: 'inline-block',
                 position: 'relative'
-            });     
+            });
         }
 
         this.setPopupBtnPos(popupButton);
@@ -414,7 +414,7 @@ export default class MermaidPopupPlugin extends Plugin {
         });
 
         popupButton.setCssStyles({display:'none'});
-        
+
         this.makePopupButtonDisplay_WhenHoverOnContainer(popupButton, targetContainer);
     }
 
@@ -842,6 +842,12 @@ export default class MermaidPopupPlugin extends Plugin {
         rightButton.classList.add('control-button', 'arrow-right');
         rightButton.textContent = '→';
 
+        // Create download button
+        const downloadButton = _doc.doc.createElement('button');
+        downloadButton.classList.add('control-button', 'download-diagram');
+        setIcon(downloadButton, 'download');
+        downloadButton.title = 'Download';
+
         // Create a close button
         const closeButton = _doc.doc.createElement('button');
         closeButton.classList.add('control-button', 'close-popup');
@@ -854,6 +860,7 @@ export default class MermaidPopupPlugin extends Plugin {
         buttonContainer.appendChild(downButton);
         buttonContainer.appendChild(leftButton);
         buttonContainer.appendChild(rightButton);
+        buttonContainer.appendChild(downloadButton);
         buttonContainer.appendChild(closeButton);
 
 
@@ -892,11 +899,51 @@ export default class MermaidPopupPlugin extends Plugin {
             this.movePopup(_targetElementInPopup, 1, 0);
         });
 
+        downloadButton.addEventListener('click', (evt) => {
+            evt.stopPropagation();
+            this.downloadDiagram(_targetElementInPopup);
+        });
+
         closeButton.addEventListener('click', (evt) => {
             evt.stopPropagation();
             evt.doc.body.removeChild(_overlay);
         });        
         return buttonContainer;
+    }
+
+    private findDiagramElement(container: HTMLElement): { svg: SVGElement | null, img: HTMLImageElement | null } {
+        let svgElement: SVGElement | null = null;
+        let imgElement: HTMLImageElement | null = null;
+
+        let coreDeep = this.getCoreDeepElement(container);
+        if (coreDeep) {
+            if (coreDeep.tagName.toLowerCase() === 'svg') {
+                svgElement = coreDeep as SVGElement;
+            } else if (coreDeep.tagName.toLowerCase() === 'img') {
+                imgElement = coreDeep as HTMLImageElement;
+            }
+        }
+
+        if (!svgElement && !imgElement) {
+            let core = this.getCoreElement(container);
+            if (core) {
+                svgElement = core.querySelector('svg');
+                if (!svgElement) {
+                    imgElement = core.querySelector('img');
+                }
+            }
+        }
+
+        return { svg: svgElement, img: imgElement };
+    }
+
+    downloadDiagram(_targetElementInPopup: HTMLElement) {
+        const { svg, img } = this.findDiagramElement(_targetElementInPopup);
+        if (!svg && !img) {
+            new Notice('No diagram found to export');
+            return;
+        }
+        new DownloadOptionModal(this.app, svg, img).open();
     }
 
     // Helper method to move the popup
@@ -1095,5 +1142,185 @@ export default class MermaidPopupPlugin extends Plugin {
             let num = parseFloat(_str);
             return isNaN(num) ? 0 : num;
         }        
-    }    
+    }
+}
+
+class DownloadOptionModal extends Modal {
+    svgElement: SVGElement | null;
+    imgElement: HTMLImageElement | null;
+
+    constructor(app: any, svgElement: SVGElement | null, imgElement: HTMLImageElement | null) {
+        super(app);
+        this.svgElement = svgElement;
+        this.imgElement = imgElement;
+    }
+
+    onOpen() {
+        this.containerEl.style.zIndex = '2000';
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.createEl('h2', { text: 'Download Diagram' });
+
+        let selectedFormat: string = 'png';
+        let selectedScale: string = '2';
+
+        // Format selection - only show SVG option when we have an SVG element
+        new Setting(contentEl)
+            .setName('Format')
+            .setDesc('Choose the output format')
+            .addDropdown(dd => {
+                if (this.svgElement) {
+                    dd.addOption('svg', 'SVG (Vector)');
+                }
+                dd.addOption('png', 'PNG (Raster)');
+                dd.setValue(selectedFormat);
+                dd.onChange(v => { selectedFormat = v; });
+            });
+
+        // Scale selection
+        new Setting(contentEl)
+            .setName('Scale')
+            .setDesc('Resolution multiplier for raster formats')
+            .addDropdown(dd => {
+                dd.addOption('1', '1x');
+                dd.addOption('2', '2x');
+                dd.addOption('3', '3x');
+                dd.addOption('4', '4x');
+                dd.setValue(selectedScale);
+                dd.onChange(v => { selectedScale = v; });
+            });
+
+        // Download button
+        new Setting(contentEl)
+            .addButton(btn => {
+                btn.setButtonText('Download')
+                   .setCta()
+                   .onClick(() => {
+                       this.doDownload(selectedFormat, parseInt(selectedScale));
+                       this.close();
+                   });
+            });
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+
+    private doDownload(format: string, scale: number) {
+        if (format === 'svg' && this.svgElement) {
+            this.exportSvg(this.svgElement);
+        } else if (this.svgElement) {
+            this.exportPngFromSvg(this.svgElement, scale);
+        } else if (this.imgElement) {
+            this.exportPngFromImg(this.imgElement, scale);
+        }
+    }
+
+    private inlineStyles(original: Element, clone: Element) {
+        const svgStyleProps = [
+            'fill', 'stroke', 'stroke-width', 'font-family',
+            'font-size', 'font-weight', 'color', 'opacity', 'display'
+        ];
+        const origElements = original.querySelectorAll('*');
+        const cloneElements = clone.querySelectorAll('*');
+
+        origElements.forEach((origEl, i) => {
+            const cloneEl = cloneElements[i] as HTMLElement;
+            if (!cloneEl) return;
+            const computed = window.getComputedStyle(origEl);
+            svgStyleProps.forEach(prop => {
+                const val = computed.getPropertyValue(prop);
+                if (val) {
+                    cloneEl.style.setProperty(prop, val);
+                }
+            });
+        });
+    }
+
+    private exportSvg(svgElement: SVGElement) {
+        const clone = svgElement.cloneNode(true) as SVGElement;
+
+        const rect = svgElement.getBoundingClientRect();
+        if (!clone.getAttribute('width')) clone.setAttribute('width', rect.width.toString());
+        if (!clone.getAttribute('height')) clone.setAttribute('height', rect.height.toString());
+        if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+        this.inlineStyles(svgElement, clone);
+
+        const serializer = new XMLSerializer();
+        const svgString = '<?xml version="1.0" encoding="UTF-8"?>\n' + serializer.serializeToString(clone);
+        const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+
+        this.triggerDownload(blob, 'diagram.svg');
+    }
+
+    private exportPngFromSvg(svgElement: SVGElement, scale: number) {
+        const clone = svgElement.cloneNode(true) as SVGElement;
+
+        const rect = svgElement.getBoundingClientRect();
+        const width = parseFloat(svgElement.getAttribute('width') || rect.width.toString());
+        const height = parseFloat(svgElement.getAttribute('height') || rect.height.toString());
+
+        if (!clone.getAttribute('width')) clone.setAttribute('width', width.toString());
+        if (!clone.getAttribute('height')) clone.setAttribute('height', height.toString());
+        if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+
+        this.inlineStyles(svgElement, clone);
+
+        const serializer = new XMLSerializer();
+        const svgString = serializer.serializeToString(clone);
+        const svgDataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
+
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = width * scale;
+            canvas.height = height * scale;
+            const ctx = canvas.getContext('2d')!;
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.scale(scale, scale);
+            ctx.drawImage(img, 0, 0, width, height);
+
+            canvas.toBlob((blob) => {
+                if (blob) {
+                    this.triggerDownload(blob, `diagram_${scale}x.png`);
+                }
+            }, 'image/png');
+        };
+        img.src = svgDataUrl;
+    }
+
+    private exportPngFromImg(imgElement: HTMLImageElement, scale: number) {
+        const width = imgElement.naturalWidth || imgElement.width;
+        const height = imgElement.naturalHeight || imgElement.height;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const ctx = canvas.getContext('2d')!;
+
+        ctx.scale(scale, scale);
+        ctx.drawImage(imgElement, 0, 0, width, height);
+
+        canvas.toBlob((blob) => {
+            if (blob) {
+                this.triggerDownload(blob, `diagram_${scale}x.png`);
+            }
+        }, 'image/png');
+    }
+
+    private triggerDownload(blob: Blob, filename: string) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        new Notice(`Downloaded ${filename}`);
+    }
 }
