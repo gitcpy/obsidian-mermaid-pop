@@ -384,14 +384,13 @@ export default class MermaidPopupPlugin extends Plugin {
 
         this.adjustDiagramWidthAndHeight_ToContainer(targetContainer);
 
-        if(this.isPreviewMode())
-            targetContainer.setCssStyles({position:'relative'});
+        // Keep the absolutely positioned button relative to the diagram container.
+        targetContainer.setCssStyles({position:'relative'});
 
         if (flagContainer)
         {
             targetContainer.setCssStyles({
-                display: 'inline-block',
-                position: 'relative'
+                display: 'inline-block'
             });     
         }
 
@@ -435,6 +434,7 @@ export default class MermaidPopupPlugin extends Plugin {
     makePopupButtonDisplay_WhenHoverOnContainer(button:HTMLElement, container:HTMLElement){
         container.addEventListener('mouseenter', () => {
             button.setCssStyles({display:'block'});
+            this.setPopupBtnPos(button);
         });
         
         container.addEventListener('mouseleave', () => {
@@ -447,12 +447,25 @@ export default class MermaidPopupPlugin extends Plugin {
     }
 
     setPopupBtnPos(btn: HTMLElement){
-        let x = this.settings.open_btn_pos_x;
-        let y = this.settings.open_btn_pos_y;
+        let container = btn.parentElement;
+        if (!container)
+            return;
+
+        let x = parseFloat(this.settings.open_btn_pos_x);
+        let y = parseFloat(this.settings.open_btn_pos_y);
+        x = Number.isFinite(x) ? x : 0;
+        y = Number.isFinite(y) ? y : 0;
+
+        // Keep the button inside the hoverable area even when the configured
+        // position is larger than a small diagram's dimensions.
+        let maxRight = Math.max(0, container.clientWidth - btn.offsetWidth);
+        let maxTop = Math.max(0, container.clientHeight - btn.offsetHeight);
+        let right = Math.min(Math.max(0, x), maxRight);
+        let top = Math.min(Math.max(0, y), maxTop);
 
         btn.setCssStyles({
-            right: x + 'px',
-            top: y + 'px'
+            right: right + 'px',
+            top: top + 'px'
         });
     }
 
