@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, setIcon  } from 'obsidian';
+import { App, Plugin, MarkdownView, setIcon, Modal, Notice, Setting } from 'obsidian';
 import MermaidPopupSettingTab from './settings';
 
 interface MermaidPopupSetting {
@@ -392,7 +392,7 @@ export default class MermaidPopupPlugin extends Plugin {
             targetContainer.setCssStyles({
                 display: 'inline-block',
                 position: 'relative'
-            });     
+            });
         }
 
         this.setPopupBtnPos(popupButton);
@@ -414,7 +414,7 @@ export default class MermaidPopupPlugin extends Plugin {
         });
 
         popupButton.setCssStyles({display:'none'});
-        
+
         this.makePopupButtonDisplay_WhenHoverOnContainer(popupButton, targetContainer);
     }
 
@@ -842,6 +842,12 @@ export default class MermaidPopupPlugin extends Plugin {
         rightButton.classList.add('control-button', 'arrow-right');
         rightButton.textContent = '→';
 
+        // Create download button
+        const downloadButton = _doc.doc.createElement('button');
+        downloadButton.classList.add('control-button', 'download-diagram');
+        setIcon(downloadButton, 'download');
+        downloadButton.title = 'Download';
+
         // Create a close button
         const closeButton = _doc.doc.createElement('button');
         closeButton.classList.add('control-button', 'close-popup');
@@ -854,6 +860,7 @@ export default class MermaidPopupPlugin extends Plugin {
         buttonContainer.appendChild(downButton);
         buttonContainer.appendChild(leftButton);
         buttonContainer.appendChild(rightButton);
+        buttonContainer.appendChild(downloadButton);
         buttonContainer.appendChild(closeButton);
 
 
@@ -892,11 +899,51 @@ export default class MermaidPopupPlugin extends Plugin {
             this.movePopup(_targetElementInPopup, 1, 0);
         });
 
+        downloadButton.addEventListener('click', (evt) => {
+            evt.stopPropagation();
+            this.downloadDiagram(_targetElementInPopup);
+        });
+
         closeButton.addEventListener('click', (evt) => {
             evt.stopPropagation();
             evt.doc.body.removeChild(_overlay);
         });        
         return buttonContainer;
+    }
+
+    private findDiagramElement(container: HTMLElement): { svg: SVGElement | null, img: HTMLImageElement | null } {
+        let svgElement: SVGElement | null = null;
+        let imgElement: HTMLImageElement | null = null;
+
+        let coreDeep = this.getCoreDeepElement(container);
+        if (coreDeep) {
+            if (coreDeep.tagName.toLowerCase() === 'svg') {
+                svgElement = coreDeep as SVGElement;
+            } else if (coreDeep.tagName.toLowerCase() === 'img') {
+                imgElement = coreDeep as HTMLImageElement;
+            }
+        }
+
+        if (!svgElement && !imgElement) {
+            let core = this.getCoreElement(container);
+            if (core) {
+                svgElement = core.querySelector('svg');
+                if (!svgElement) {
+                    imgElement = core.querySelector('img');
+                }
+            }
+        }
+
+        return { svg: svgElement, img: imgElement };
+    }
+
+    downloadDiagram(_targetElementInPopup: HTMLElement) {
+        const { svg, img } = this.findDiagramElement(_targetElementInPopup);
+        if (!svg && !img) {
+            new Notice('No diagram found to export');
+            return;
+        }
+        new DownloadOptionModal(this.app, svg, img).open();
     }
 
     // Helper method to move the popup
@@ -1095,5 +1142,304 @@ export default class MermaidPopupPlugin extends Plugin {
             let num = parseFloat(_str);
             return isNaN(num) ? 0 : num;
         }        
-    }    
+    }
+}
+
+class DownloadOptionModal extends Modal {
+    svgElement: SVGElement | null;
+    imgElement: HTMLImageElement | null;
+    // Document that hosts the diagram element; may be a popout window's
+    // document instead of the main window's (see openPopup / ele.doc usage)
+    doc: Document;
+
+    constructor(app: App, svgElement: SVGElement | null, imgElement: HTMLImageElement | null) {
+        super(app);
+        this.svgElement = svgElement;
+        this.imgElement = imgElement;
+        // downloadDiagram() only opens this modal when at least one is set
+        this.doc = (svgElement ?? imgElement)!.doc;
+    }
+
+    onOpen() {
+        // layer above the popup (overlay=1000 / button-container=1002, see styles.css)
+        this.containerEl.style.zIndex = '2000';
+        const { contentEl } = this;
+        contentEl.empty();
+        contentEl.createEl('h2', { text: 'Download Diagram' });
+
+        let selectedFormat: string = 'png';
+        let selectedScale: string = '2';
+        let scaleSetting: Setting | null = null;
+
+        // Format selection - only show SVG option when we have an SVG element
+        new Setting(contentEl)
+            .setName('Format')
+            .setDesc('Choose the output format')
+            .addDropdown(dd => {
+                if (this.svgElement) {
+                    dd.addOption('svg', 'SVG (Vector)');
+                }
+                dd.addOption('png', 'PNG (Raster)');
+                dd.setValue(selectedFormat);
+                dd.onChange(v => {
+                    selectedFormat = v;
+                    // scale only affects raster output
+                    scaleSetting?.setDisabled(v === 'svg');
+                });
+            });
+
+        // Scale selection
+        scaleSetting = new Setting(contentEl)
+            .setName('Scale')
+            .setDesc('Resolution multiplier for raster formats')
+            .addDropdown(dd => {
+                dd.addOption('1', '1x');
+                dd.addOption('2', '2x');
+                dd.addOption('3', '3x');
+                dd.addOption('4', '4x');
+                dd.setValue(selectedScale);
+                dd.onChange(v => { selectedScale = v; });
+            });
+
+        // Download button
+        new Setting(contentEl)
+            .addButton(btn => {
+                btn.setButtonText('Download')
+                   .setCta()
+                   .onClick(() => {
+                       this.doDownload(selectedFormat, parseInt(selectedScale));
+                       this.close();
+                   });
+            });
+    }
+
+    onClose() {
+        this.contentEl.empty();
+    }
+
+    private doDownload(format: string, scale: number) {
+        if (format === 'svg' && this.svgElement) {
+            this.exportSvg(this.svgElement);
+        } else if (this.svgElement) {
+            this.exportPngFromSvg(this.svgElement, scale);
+        } else if (this.imgElement) {
+            this.exportPngFromImg(this.imgElement, scale);
+        }
+    }
+
+    private inlineStyles(original: Element, clone: Element) {
+        const svgStyleProps = [
+            'fill', 'stroke', 'stroke-width', 'font-family',
+            'font-size', 'font-weight', 'color', 'opacity', 'display'
+        ];
+        const origElements = original.querySelectorAll('*');
+        const cloneElements = clone.querySelectorAll('*');
+
+        origElements.forEach((origEl, i) => {
+            const cloneEl = cloneElements[i] as HTMLElement;
+            if (!cloneEl) return;
+            // use the element's own window: the diagram may live in a popout,
+            // and calling the main window's getComputedStyle on it throws
+            const computed = origEl.win.getComputedStyle(origEl);
+            svgStyleProps.forEach(prop => {
+                const val = computed.getPropertyValue(prop);
+                if (val) {
+                    cloneEl.style.setProperty(prop, val);
+                }
+            });
+        });
+    }
+
+    private exportSvg(svgElement: SVGElement) {
+        const clone = svgElement.cloneNode(true) as SVGElement;
+
+        const { width, height } = this.getDiagramSize(svgElement);
+        if (!this.validSize(width, height)) {
+            new Notice('Failed to determine diagram size');
+            return;
+        }
+        this.normalizeSvgSize(clone, width, height);
+
+        this.inlineStyles(svgElement, clone);
+
+        const serializer = new XMLSerializer();
+        const svgString = '<?xml version="1.0" encoding="UTF-8"?>\n' + serializer.serializeToString(clone);
+        const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+
+        this.triggerDownload(blob, 'diagram.svg', this.doc);
+    }
+
+    private exportPngFromSvg(svgElement: SVGElement, scale: number) {
+        const clone = svgElement.cloneNode(true) as SVGElement;
+
+        const { width, height } = this.getDiagramSize(svgElement);
+        if (!this.validSize(width, height)) {
+            new Notice('Failed to determine diagram size');
+            return;
+        }
+        this.normalizeSvgSize(clone, width, height);
+
+        this.inlineStyles(svgElement, clone);
+
+        // mermaid htmlLabels render text inside <foreignObject>; Chromium
+        // renders it in SVG-as-image, but the secure static mode skips
+        // external resources (web fonts, linked images)
+        if (clone.querySelector('foreignObject')) {
+            new Notice('HTML labels detected; external fonts/images may not render in PNG - consider SVG export.');
+        }
+
+        const serializer = new XMLSerializer();
+        const svgString = serializer.serializeToString(clone);
+        const svgDataUrl = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svgString);
+
+        const effectiveScale = this.fitCanvasScale(width, height, scale);
+
+        // the Image constructor's own realm does not matter for data URLs
+        const img = new Image();
+        img.onload = () => {
+            const canvas = this.doc.createElement('canvas');
+            canvas.width = Math.round(width * effectiveScale);
+            canvas.height = Math.round(height * effectiveScale);
+            const ctx = canvas.getContext('2d')!;
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            ctx.scale(effectiveScale, effectiveScale);
+            ctx.drawImage(img, 0, 0, width, height);
+
+            this.canvasToBlobDownload(canvas, `diagram_${Math.round(effectiveScale * 100) / 100}x.png`);
+        };
+        img.onerror = () => {
+            new Notice('Failed to load SVG for PNG export');
+        };
+        img.src = svgDataUrl;
+    }
+
+    private exportPngFromImg(imgElement: HTMLImageElement, scale: number) {
+        const width = imgElement.naturalWidth || imgElement.width;
+        const height = imgElement.naturalHeight || imgElement.height;
+        if (!this.validSize(width, height)) {
+            new Notice('Failed to determine diagram size');
+            return;
+        }
+
+        const effectiveScale = this.fitCanvasScale(width, height, scale);
+
+        const canvas = this.doc.createElement('canvas');
+        canvas.width = Math.round(width * effectiveScale);
+        canvas.height = Math.round(height * effectiveScale);
+        const ctx = canvas.getContext('2d')!;
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.scale(effectiveScale, effectiveScale);
+        ctx.drawImage(imgElement, 0, 0, width, height);
+
+        this.canvasToBlobDownload(canvas, `diagram_${Math.round(effectiveScale * 100) / 100}x.png`);
+    }
+
+    private triggerDownload(blob: Blob, filename: string, doc: Document) {
+        const url = URL.createObjectURL(blob);
+        const a = doc.createElement('a');
+        a.href = url;
+        a.download = filename;
+        doc.body.appendChild(a);
+        a.click();
+        doc.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        new Notice(`Downloaded ${filename}`);
+    }
+
+    // Intrinsic diagram size in pixels. viewBox comes first: it is immune to
+    // the popup's transform: scale() and to CSS sizing. Next, px-valued
+    // width/height attributes are the authored size and share the content
+    // coordinate system (PlantUML-style SVGs have them and no viewBox) —
+    // unlike computed style they are unaffected by this plugin shrinking the
+    // diagram via inline styles. Computed style is the layout size, which
+    // transforms also leave untouched. getBoundingClientRect is a last resort
+    // because it DOES include the popup zoom.
+    private getDiagramSize(svgElement: SVGElement): { width: number, height: number } {
+        const viewBox = svgElement.getAttribute('viewBox');
+        if (viewBox) {
+            const parts = viewBox.trim().split(/[\s,]+/).map(parseFloat);
+            if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) {
+                return { width: parts[2], height: parts[3] };
+            }
+        }
+        const attrW = this.parsePxLength(svgElement.getAttribute('width'));
+        const attrH = this.parsePxLength(svgElement.getAttribute('height'));
+        if (attrW > 0 && attrH > 0) {
+            return { width: attrW, height: attrH };
+        }
+        const w = parseFloat(svgElement.getCssPropertyValue('width'));
+        const h = parseFloat(svgElement.getCssPropertyValue('height'));
+        if (w > 0 && h > 0) {
+            return { width: w, height: h };
+        }
+        const rect = svgElement.getBoundingClientRect();
+        return { width: rect.width, height: rect.height };
+    }
+
+    // accepts "512" and "512px" (SVG user units are px); rejects "100%",
+    // "10em", "auto" and anything non-numeric
+    private parsePxLength(value: string | null): number {
+        if (!value) return 0;
+        const v = value.trim();
+        if (v.endsWith('px')) return parseFloat(v) || 0;
+        if (/^\d+(\.\d+)?$/.test(v)) return parseFloat(v);
+        return 0;
+    }
+
+    private validSize(width: number, height: number): boolean {
+        return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0;
+    }
+
+    // Overwrite the size attributes with intrinsic pixels and drop the inline
+    // sizing styles copied from the popup (e.g. max-width), so the exported
+    // file does not depend on popup state.
+    private normalizeSvgSize(clone: SVGElement, width: number, height: number) {
+        clone.style.removeProperty('width');
+        clone.style.removeProperty('height');
+        clone.style.removeProperty('max-width');
+        clone.setAttribute('width', width.toString());
+        clone.setAttribute('height', height.toString());
+        if (!clone.getAttribute('xmlns')) clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    }
+
+    // Chromium caps canvas sides at ~16384px; exceeding the cap silently
+    // yields a blank image, so step the scale down — and clamp to a
+    // fractional factor when even 1x would exceed the cap.
+    private fitCanvasScale(width: number, height: number, scale: number): number {
+        const MAX_SIDE = 16384;
+        let s = scale;
+        while (s > 1 && (width * s > MAX_SIDE || height * s > MAX_SIDE)) {
+            s--;
+        }
+        const maxFactor = Math.min(MAX_SIDE / width, MAX_SIDE / height);
+        if (maxFactor < s) {
+            s = maxFactor;
+        }
+        if (s < scale) {
+            new Notice(`Scale reduced to ${Math.round(s * 100) / 100}x to stay within canvas limits`);
+        }
+        return s;
+    }
+
+    private canvasToBlobDownload(canvas: HTMLCanvasElement, filename: string) {
+        try {
+            canvas.toBlob((blob) => {
+                if (blob) {
+                    this.triggerDownload(blob, filename, this.doc);
+                } else {
+                    new Notice('Failed to export PNG');
+                }
+            }, 'image/png');
+        } catch {
+            // cross-origin images may taint the canvas; Chromium signals this
+            // either by throwing here or by calling back with a null blob
+            new Notice('Export failed: cross-origin image cannot be exported');
+        }
+    }
 }
